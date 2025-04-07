@@ -216,7 +216,8 @@ const transformConfig = (req) => {
       cfg[matchedKey] = req[key];
     }
   }
-  if (req.response_format) {
+  // Only handle response format for non-image requests
+  if (req.response_format && req.response_format.type !== "image") {
     switch(req.response_format.type) {
       case "json_schema":
         cfg.responseSchema = req.response_format.json_schema?.schema;
@@ -324,11 +325,22 @@ const transformMessages = async (messages) => {
   return { system_instruction, contents };
 };
 
-const transformRequest = async (req) => ({
-  ...await transformMessages(req.messages),
-  safetySettings,
-  generationConfig: transformConfig(req),
-});
+const transformRequest = async (req) => {
+  // Transform messages into the Gemini API format
+  const transformed = await transformMessages(req.messages);
+  
+  return {
+    // Use the model from the request or fallback to default
+    model: req.model || DEFAULT_MODEL,
+    contents: transformed.contents,
+    safetySettings,
+    generationConfig: {
+      ...transformConfig(req),
+      // Set response modalities based on request type
+      responseModalities: req.response_format?.type === "image" ? ["Text", "Image"] : ["Text"]
+    }
+  };
+};
 
 const generateChatcmplId = () => {
   const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -364,6 +376,16 @@ const transformUsage = (data) => ({
 });
 
 const processCompletionsResponse = (data, model, id) => {
+  // Handle image responses
+  if (data.candidates[0]?.content?.parts[0]?.inlineData?.mimeType === "image/png") {
+    return JSON.stringify({
+      id,
+      data: data.candidates[0].content.parts[0].inlineData.data,
+      object: "image"
+    });
+  }
+  
+  // Handle text responses
   return JSON.stringify({
     id,
     choices: data.candidates.map(transformCandidatesMessage),
