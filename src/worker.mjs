@@ -11,7 +11,13 @@ export default {
     };
     try {
       const auth = request.headers.get("Authorization");
-      const apiKey = auth?.split(" ")[1];
+      if (!auth) {
+        throw new HttpError("Authorization header is required. Format: 'Bearer <API_KEY>'", 401);
+      }
+      const apiKey = auth.split(" ")[1];
+      if (!apiKey) {
+        throw new HttpError("Invalid Authorization header format. Expected 'Bearer <API_KEY>'", 401);
+      }
       const assert = (success) => {
         if (!success) {
           throw new HttpError("The specified HTTP method is not allowed for the requested resource", 400);
@@ -21,8 +27,13 @@ export default {
       switch (true) {
         case pathname.endsWith("/chat/completions"):
           assert(request.method === "POST");
-          return handleCompletions(await request.json(), apiKey)
-            .catch(errHandler);
+          try {
+            const json = await request.json();
+            return handleCompletions(json, apiKey).catch(errHandler);
+          } catch (err) {
+            console.error("Error parsing request JSON:", err);
+            throw new HttpError("Invalid JSON in request body", 400);
+          }
         case pathname.endsWith("/embeddings"):
           assert(request.method === "POST");
           return handleEmbeddings(await request.json(), apiKey)
@@ -79,7 +90,11 @@ async function handleModels (apiKey) {
   const response = await fetch(`${BASE_URL}/${API_VERSION}/models`, {
     headers: makeHeaders(apiKey),
   });
+  console.log("Models API response status:", response.status);
   let { body } = response;
+  if (!response.ok) {
+    console.error("Models API error:", await response.text());
+  }
   if (response.ok) {
     const { models } = JSON.parse(await response.text());
     body = JSON.stringify({
@@ -178,6 +193,7 @@ async function handleCompletions (req, apiKey) {
         }))
         .pipeThrough(new TextEncoderStream());
     } else {
+      console.log("response.status:", response.status);
       body = await response.text();
       body = processCompletionsResponse(JSON.parse(body), model, id);
     }
@@ -185,17 +201,29 @@ async function handleCompletions (req, apiKey) {
   return new Response(body, fixCors(response));
 }
 
-const harmCategory = [
-  "HARM_CATEGORY_HATE_SPEECH",
-  "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-  "HARM_CATEGORY_DANGEROUS_CONTENT",
-  "HARM_CATEGORY_HARASSMENT",
-  "HARM_CATEGORY_CIVIC_INTEGRITY",
-];
-const safetySettings = harmCategory.map(category => ({
-  category,
-  threshold: "BLOCK_NONE",
-}));
+const safetySettings = (req) => {
+  const harmCategory = [
+    "HARM_CATEGORY_HATE_SPEECH",
+    "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+    "HARM_CATEGORY_DANGEROUS_CONTENT",
+    "HARM_CATEGORY_HARASSMENT",
+    "HARM_CATEGORY_CIVIC_INTEGRITY",
+  ];
+  
+  // For image processing requests, use more permissive settings
+  if (req.response_format?.type === "image") {
+    return harmCategory.map(category => ({
+      category,
+      threshold: "BLOCK_ONLY_HIGH"
+    }));
+  }
+  
+  // Default safety settings for other requests
+  return harmCategory.map(category => ({
+    category,
+    threshold: "BLOCK_NONE"
+  }));
+};
 const fieldsMap = {
   stop: "stopSequences",
   n: "candidateCount", // not for streaming
@@ -248,14 +276,21 @@ const parseImg = async (url) => {
         throw new Error(`${response.status} ${response.statusText} (${url})`);
       }
       mimeType = response.headers.get("content-type");
+      if (!mimeType?.startsWith('image/')) {
+        throw new Error(`Invalid image content type: ${mimeType}`);
+      }
       data = Buffer.from(await response.arrayBuffer()).toString("base64");
     } catch (err) {
       throw new Error("Error fetching image: " + err.toString());
     }
   } else {
-    const match = url.match(/^data:(?<mimeType>.*?)(;base64)?,(?<data>.*)$/);
+    // Check for placeholder values
+    if (url.startsWith('$') || url.endsWith('%')) {
+      throw new Error('Placeholder image data detected. Please provide valid image data.');
+    }
+    const match = url.match(/^data:(?<mimeType>image\/.*?)(;base64)?,(?<data>.*)$/);
     if (!match) {
-      throw new Error("Invalid image data: " + url);
+      throw new Error(`Invalid image data URL. Expected format: data:image/<type>[;base64],<data>. Got: ${url.slice(0, 100)}`);
     }
     ({ mimeType, data } = match.groups);
   }
@@ -333,7 +368,7 @@ const transformRequest = async (req) => {
     // Use the model from the request or fallback to default
     model: req.model || DEFAULT_MODEL,
     contents: transformed.contents,
-    safetySettings,
+    safetySettings: safetySettings(req),
     generationConfig: {
       ...transformConfig(req),
       // Set response modalities based on request type
@@ -380,8 +415,23 @@ const processCompletionsResponse = (data, model, id) => {
   if (data.candidates[0]?.content?.parts[0]?.inlineData?.mimeType === "image/png") {
     return JSON.stringify({
       id,
-      data: data.candidates[0].content.parts[0].inlineData.data,
-      object: "image"
+      object: "chat.completion",
+      model,
+      created: Math.floor(Date.now()/1000),
+      choices: [{
+        index: 0,
+        message: {
+          role: "assistant",
+          content: [{
+            type: "image_url",
+            image_url: {
+              url: `data:image/png;base64,${data.candidates[0].content.parts[0].inlineData.data}`
+            }
+          }]
+        },
+        finish_reason: "stop"
+      }],
+      usage: data.usageMetadata ? transformUsage(data.usageMetadata) : null
     });
   }
   
@@ -391,7 +441,6 @@ const processCompletionsResponse = (data, model, id) => {
     choices: data.candidates.map(transformCandidatesMessage),
     created: Math.floor(Date.now()/1000),
     model,
-    //system_fingerprint: "fp_69829325d0",
     object: "chat.completion",
     usage: transformUsage(data.usageMetadata),
   });
