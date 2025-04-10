@@ -412,28 +412,32 @@ const transformUsage = (data) => ({
 
 const processCompletionsResponse = (data, model, id) => {
   // Handle image responses
-  if (data.candidates[0]?.content?.parts[0]?.inlineData?.mimeType === "image/png") {
-    return JSON.stringify({
-      id,
-      object: "chat.completion",
-      model,
-      created: Math.floor(Date.now()/1000),
-      choices: [{
-        index: 0,
-        message: {
-          role: "assistant",
-          content: [{
-            type: "image_url",
-            image_url: {
-              url: `data:image/png;base64,${data.candidates[0].content.parts[0].inlineData.data}`
-            }
-          }]
-        },
-        finish_reason: "stop"
-      }],
-      usage: data.usageMetadata ? transformUsage(data.usageMetadata) : null
-    });
-  }
+  try {
+    if (data.candidates[0]?.content?.parts[0]?.inlineData?.mimeType === "image/png") {
+      return JSON.stringify({
+        id,
+        object: "chat.completion",
+        model,
+        created: Math.floor(Date.now()/1000),
+        choices: [{
+          index: 0,
+          message: {
+            role: "assistant",
+            content: [{
+              type: "image_url",
+              image_url: {
+                url: `data:image/png;base64,${data.candidates[0].content.parts[0].inlineData.data}`
+              }
+            }]
+          },
+          finish_reason: "stop"
+        }],
+        usage: data.usageMetadata ? transformUsage(data.usageMetadata) : null
+      });
+    }
+  } catch(e) {
+    console.log(`Get Image response error: ${e}`)
+  };
   
   // Handle text responses
   return JSON.stringify({
