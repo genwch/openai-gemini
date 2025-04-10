@@ -436,18 +436,22 @@ const processCompletionsResponse = (data, model, id) => {
       });
     }
   } catch(e) {
-    console.log(`Get Image response error: ${e}`)
+    console.log(`Get Image response error: ${e}`);
   };
   
   // Handle text responses
-  return JSON.stringify({
-    id,
-    choices: data.candidates.map(transformCandidatesMessage),
-    created: Math.floor(Date.now()/1000),
-    model,
-    object: "chat.completion",
-    usage: transformUsage(data.usageMetadata),
-  });
+  try {
+    return JSON.stringify({
+      id,
+      choices: data.candidates.map(transformCandidatesMessage),
+      created: Math.floor(Date.now()/1000),
+      model,
+      object: "chat.completion",
+      usage: transformUsage(data.usageMetadata),
+    });
+  } catch(e) {
+    console.log(`Unexpected response: ${data}\nError:\n${e}`);
+  }
 };
 
 const responseLineRE = /^data: (.*)(?:\n\n|\r\r|\r\n\r\n)/;
